@@ -11,6 +11,7 @@ on:
 
 jobs:
   publish:
+    if: "github.repository == 'Viren070/AIOStreams'"
     name: publish
     runs-on: ubuntu-latest
     permissions:

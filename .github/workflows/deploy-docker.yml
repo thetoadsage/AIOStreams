@@ -1,267 +1,134 @@
-name: Build and Deploy Docker Images
+name: Publish metadata reliability image
 
 on:
+  push:
+    branches: [metadata-reliability]
   workflow_dispatch:
-    inputs:
-      ref:
-        description: Git Ref
-        required: true
-        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metadata-image-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
-  setup:
-    name: Setup
+  validate:
+    if: github.repository == 'thetoadsage/AIOStreams'
+    uses: ./.github/workflows/build.yml
+
+  publish:
+    needs: validate
+    if: github.repository == 'thetoadsage/AIOStreams' && github.ref == 'refs/heads/metadata-reliability'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
-    outputs:
-      tags: ${{ steps.tags.outputs.tags }}
-      channel: ${{ steps.tags.outputs.channel }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          ref: ${{ inputs.ref }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Calculate tags
-        id: tags
-        env:
-          INPUT_REF: ${{ inputs.ref }}
-        run: |
-          declare TAGS=""
-          case "${INPUT_REF}" in
-          v[0-9]*.[0-9]*.[0-9]*)
-            TAGS="${INPUT_REF}"
-            if [[ "$(git rev-parse origin/main)" = "$(git rev-parse "${INPUT_REF}")" ]]; then
-              MAJOR_MINOR=$(echo "${INPUT_REF}" | sed -E 's/v([0-9]+)\.([0-9]+)\.[0-9]+/\1.\2/')
-              MAJOR=$(echo "${INPUT_REF}" | sed -E 's/v([0-9]+)\.[0-9]+\.[0-9]+/\1/')
-              TAGS="${TAGS} latest v${MAJOR_MINOR} v${MAJOR}"
-            fi
-            CHANNEL="stable"
-            ;;
-          [0-9]*.[0-9]*.[0-9]*-nightly)
-            TAGS="${INPUT_REF} nightly"
-            CHANNEL="nightly"
-            ;;
-          *)
-            echo "Invalid Input Ref: ${INPUT_REF}"
-            exit 1
-            ;;
-          esac
-
-          if [[ -z "${TAGS}" ]]; then
-            echo "Empty Tags!"
-            exit 1
-          fi
-
-          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
-          echo "channel=${CHANNEL}" >> $GITHUB_OUTPUT
-
-  build:
-    name: build (${{ matrix.suffix }})
-    needs: setup
-    permissions:
       packages: write
-      contents: read
-    strategy:
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-            suffix: amd64
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            suffix: arm64
-    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
-          ref: ${{ inputs.ref }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+          persist-credentials: false
+      - name: Resolve image identity
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          image="ghcr.io/${REPOSITORY,,}:sha-${COMMIT}"
+          echo "ref=$image" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v4
-
+      - name: Preserve existing commit tags
+        id: existing
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE" >/dev/null 2>registry-check.log; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+            echo 'Commit image already exists; it will not be overwritten.'
+          elif grep -Eqi 'not found|manifest unknown|name unknown' registry-check.log; then
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          else
+            cat registry-check.log >&2
+            exit 1
+          fi
       - uses: actions/setup-node@v7
+        if: steps.existing.outputs.exists != 'true'
         with:
           node-version: 24
-
-      - name: Generate metadata
-        run: node scripts/generateMetadata.cjs --channel=${{ needs.setup.outputs.channel }}
-
-      - name: Build & Push
-        id: build
+      - name: Generate build metadata
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          COMMIT: ${{ github.sha }}
+        run: node scripts/generateMetadata.cjs --channel=dev --ref=metadata-reliability --commit="$COMMIT"
+      - name: Build the image before publishing
+        if: steps.existing.outputs.exists != 'true'
         uses: docker/build-push-action@v7
         with:
-          platforms: ${{ matrix.platform }}
-          push: true
           context: .
           file: ./Dockerfile
-          outputs: type=image,name=ghcr.io/viren070/aiostreams,push-by-digest=true,name-canonical=true
-          cache-from: type=gha,scope=${{ matrix.suffix }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.suffix }}
-
-      - name: Export digest
-        run: echo "${{ steps.build.outputs.digest }}" > "/tmp/${{ matrix.suffix }}"
-
-      - name: Upload digest artifact
-        uses: actions/upload-artifact@v7
-        with:
-          path: /tmp/${{ matrix.suffix }}
-          archive: false
-          retention-days: 1
-
-  merge:
-    name: Merge manifests
-    needs: [setup, build]
-    runs-on: ubuntu-latest
-    permissions:
-      packages: write
-      contents: read
-    steps:
-      - name: Download digests
-        uses: actions/download-artifact@v8
-        with:
-          path: /tmp/digests
-          pattern: '{amd64,arm64}'
-          merge-multiple: true
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Create and push manifests
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ steps.image.outputs.ref }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=sha-${{ github.sha }}
+          cache-from: type=gha,scope=metadata-reliability-amd64
+          cache-to: type=gha,mode=max,scope=metadata-reliability-amd64
+      - name: Smoke-test the built container and SQLite startup
+        if: steps.existing.outputs.exists != 'true'
         env:
-          TAGS: ${{ needs.setup.outputs.tags }}
+          IMAGE: ${{ steps.image.outputs.ref }}
         run: |
-          for tag in ${TAGS}; do
-            docker buildx imagetools create \
-              -t "viren070/aiostreams:${tag}" \
-              -t "ghcr.io/viren070/aiostreams:${tag}" \
-              "ghcr.io/viren070/aiostreams@$(cat /tmp/digests/amd64)" \
-              "ghcr.io/viren070/aiostreams@$(cat /tmp/digests/arm64)"
-          done
-
-      - name: Send Discord Notification
-        env:
-          CHANNEL: ${{ needs.setup.outputs.channel }}
-          TAGS: ${{ needs.setup.outputs.tags }}
-        run: |
-          # Determine role based on channel
-          if [ "$CHANNEL" = "stable" ]; then
-            ROLE_ID="<@&1384627130272452638>"
-            COLOR=5763719  # Green
-            TITLE="🎉 Stable Release"
-          else
-            ROLE_ID="<@&1384627462155272242>"
-            COLOR=15844367  # Orange
-            TITLE="🌙 Nightly Build"
-          fi
-
-          # Format tags for display (each tag on a new line with bullet points)
-          FORMATTED_TAGS=""
-          for tag in $TAGS; do
-            if [ -z "$FORMATTED_TAGS" ]; then
-              FORMATTED_TAGS="• \`$tag\`"
-            else
-              FORMATTED_TAGS="$FORMATTED_TAGS\n• \`$tag\`"
+          SECRET_KEY=$(openssl rand -hex 32)
+          echo "::add-mask::$SECRET_KEY"
+          export SECRET_KEY
+          docker run -d --name aiostreams-ci \
+            --mount type=tmpfs,destination=/app/data \
+            -p 127.0.0.1:3001:3000 \
+            -e SECRET_KEY -e NODE_ENV=production \
+            -e BASE_URL=http://localhost:3001 \
+            -e INTERNAL_URL=http://127.0.0.1:3000 \
+            -e DATABASE_URI=sqlite:///app/data/staging.sqlite \
+            "$IMAGE"
+          for attempt in $(seq 1 36); do
+            if curl -fsS http://127.0.0.1:3001/api/v1/status >/dev/null; then
+              docker exec aiostreams-ci /nodejs/bin/node /app/scripts/healthcheck.js
+              exit 0
             fi
+            if [ "$(docker inspect -f '{{.State.Running}}' aiostreams-ci)" != true ]; then break; fi
+            sleep 5
           done
-
-          # Get current timestamp in ISO 8601 format UTC
-          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-          # Create JSON payload file
-          cat << EOF > discord_payload.json
-          {
-            "content": "$ROLE_ID",
-            "embeds": [
-              {
-                "title": "$TITLE - Docker Images Published",
-                "description": "New Docker images have been built and pushed to registries.",
-                "color": $COLOR,
-                "fields": [
-                  {
-                    "name": "📦 Channel",
-                    "value": "• \`$CHANNEL\`",
-                    "inline": true
-                  },
-                  {
-                    "name": "🏷️ Tags Published",
-                    "value": "$FORMATTED_TAGS",
-                    "inline": false
-                  },
-                  {
-                    "name": "📍 View Images",
-                    "value": "[Docker Hub](https://hub.docker.com/r/viren070/aiostreams) · [GHCR](https://github.com/Viren070/AIOStreams/pkgs/container/aiostreams)",
-                    "inline": false
-                  },
-                  {
-                    "name": "📝 View Release Notes",
-                    "value": "[GitHub](https://github.com/Viren070/AIOStreams/releases/tag/${{ inputs.ref }})",
-                    "inline": false
-                  },
-                  {
-                    "name": "🔗 View Build",
-                    "value": "[GitHub Actions](https://github.com/Viren070/aiostreams/actions/runs/${{ github.run_id }})",
-                    "inline": false
-                  }
-                ],
-                "footer": {
-                  "text": "AIOStreams CI",
-                  "icon_url": "https://github.com/Viren070.png"
-                },
-                "timestamp": "$TIMESTAMP"
-              }
-            ]
-          }
-          EOF
-
-          echo "Sending to Discord:"
-          cat discord_payload.json
-
-          # Send payload to Discord and capture response and status code
-          http_response=$(curl -s -w "\n%{http_code}" -H "Content-Type: application/json" \
-            -X POST \
-            -d @discord_payload.json \
-            "${{ secrets.DISCORD_WEBHOOK_URL }}")
-
-          http_body=$(echo "$http_response" | sed '$d')
-          http_code=$(echo "$http_response" | tail -n1)
-
-          echo "HTTP Status Code: $http_code"
-          echo "Discord Response Body: $http_body"
-
-          if [ "$http_code" != "204" ]; then
-            echo "Error sending to Discord webhook."
-            exit 1
-          fi
-
-          echo "Message sent successfully!"
+          docker logs aiostreams-ci
+          exit 1
+      - name: Publish the tested image
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: docker push "$IMAGE"
+      - name: Verify registry publication and record immutable digest
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          docker pull "$IMAGE"
+          revision=$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")
+          test "$revision" = "$COMMIT"
+          digest=$(docker image inspect -f '{{index .RepoDigests 0}}' "$IMAGE")
+          printf 'Image: `%s`\n\nDeploy by digest: `%s`\n' "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$IMAGE" "$digest" > image-reference.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: image-reference-${{ github.sha }}
+          path: image-reference.txt
+          retention-days: 90
+      - name: Remove test container
+        if: always()
+        run: docker rm -f aiostreams-ci || true

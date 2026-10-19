@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   build:
+    if: "github.repository == 'Viren070/AIOStreams'"
     uses: ./.github/workflows/smart-tv-build.yml
     with:
       release: ${{ inputs.tag }}

@@ -1,0 +1,40 @@
+name: aiostreams-staging
+
+services:
+  aiostreams:
+    image: ${AIOSTREAMS_IMAGE:?Run init.sh with a published commit image or digest}
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:3001:3000'
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      BASE_URL: http://localhost:3001
+      INTERNAL_URL: http://127.0.0.1:3000
+      DATABASE_URI: sqlite:///app/data/staging.sqlite
+      REDIS_URI: ''
+      SECRET_KEY: ${SECRET_KEY:?Run init.sh to create a new staging secret}
+      AIOSTREAMS_AUTH: ${AIOSTREAMS_AUTH:?Run init.sh to create staging credentials}
+      AIOSTREAMS_AUTH_ADMINS: staging
+      SYSTEM_LIFECYCLE_ENABLED: 'false'
+    volumes:
+      - type: bind
+        source: ./data
+        target: /app/data
+        bind:
+          create_host_path: false
+    networks:
+      - staging
+    labels:
+      traefik.enable: 'false'
+      com.centurylinklabs.watchtower.enable: 'false'
+    mem_limit: 2g
+    cpus: 2
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+networks:
+  staging:

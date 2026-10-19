@@ -6,4 +6,9 @@
 **/.next
 **/data
 .env
+**/.env.*
+!**/.env.sample
+!**/.env.example
 .git
+**/[mM][eE][mM][oO][rR][yY].md
+.pnpm-store/

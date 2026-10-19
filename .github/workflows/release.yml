@@ -6,6 +6,7 @@ on:
 
 jobs:
   release:
+    if: "github.repository == 'Viren070/AIOStreams'"
     name: release
     runs-on: ubuntu-latest
     permissions:

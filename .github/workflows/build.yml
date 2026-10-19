@@ -1,39 +1,45 @@
-name: Build Addon
+name: Validate AIOStreams
 
 on:
+  workflow_call:
+  workflow_dispatch:
   pull_request:
-    branches:
-      - main
-    paths:
-      - 'packages/**'
-      - '!packages/desktop/**'
-      - '!packages/docs/**'
-      - '!packages/**/*.md'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'pnpm-workspace.yaml'
-      - 'patches/**'
-      - 'tsconfig.json'
-      - 'tsconfig.base.json'
+    branches: [main, metadata-reliability]
 
-concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: read
 
 jobs:
-  test:
-    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
+  validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - name: Use Node.js
-        uses: actions/setup-node@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
-
-      - name: Install corepack
-        run: corepack enable
-      - name: Install Dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Build Addon
-        run: pnpm run build
+      - name: Install dependencies
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+      - name: Generate build metadata
+        env:
+          BUILD_COMMIT: ${{ github.sha }}
+        run: node scripts/generateMetadata.cjs --channel=dev --ref=metadata-reliability --commit="$BUILD_COMMIT"
+      - name: Reject local secrets and memory files
+        run: |
+          python3 - <<'CHECK'
+          import pathlib, subprocess
+          files = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          forbidden = [p for p in files if p and (pathlib.Path(p).name.lower() == 'memory.md' or (pathlib.Path(p).name.startswith('.env') and pathlib.Path(p).name not in ('.env.sample', '.env.example')))]
+          if forbidden:
+              raise SystemExit('Local files must not be tracked: ' + ', '.join(forbidden))
+          CHECK
+      - name: Core regression tests
+        run: pnpm -F @aiostreams/core test
+      - name: Frontend tests
+        run: pnpm -F @aiostreams/frontend test
+      - name: Build all container packages
+        run: pnpm build

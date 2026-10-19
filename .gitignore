@@ -7,6 +7,10 @@ out/
 next-env.d.ts
 .wrangler/
 .env
+**/.env.*
+!**/.env.sample
+!**/.env.example
+**/[mM][eE][mM][oO][rR][yY].md
 metadata.json
 data/
 testing/

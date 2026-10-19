@@ -21,7 +21,7 @@ on:
 jobs:
   release:
     name: release
-    if: "${{ github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'chore: release ') }}"
+    if: "github.repository == 'Viren070/AIOStreams' && (github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'chore: release '))"
     runs-on: ubuntu-latest
     permissions:
       actions: write

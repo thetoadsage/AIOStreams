@@ -14,6 +14,7 @@ on:
 jobs:
   # The page both packages hold, built once.
   web:
+    if: "github.repository == 'Viren070/AIOStreams'"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -44,6 +45,7 @@ jobs:
           retention-days: 1
 
   webos:
+    if: "github.repository == 'Viren070/AIOStreams'"
     needs: web
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -77,6 +79,7 @@ jobs:
         run: gh release upload "$RELEASE" "packages/smart-tv/out/$IPK" --clobber
 
   tizen:
+    if: "github.repository == 'Viren070/AIOStreams'"
     needs: web
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -113,7 +116,7 @@ jobs:
   # names that stay the same, and the Homebrew Channel repository on `smart-tv-feed`.
   feed:
     needs: [web, webos, tizen]
-    if: inputs.release != ''
+    if: "github.repository == 'Viren070/AIOStreams' && (inputs.release != '')"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:

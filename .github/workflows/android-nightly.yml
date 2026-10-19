@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   version:
-    if: "${{ !startsWith(github.event.head_commit.message, 'chore(android): release ') }}"
+    if: "github.repository == 'Viren070/AIOStreams' && (!startsWith(github.event.head_commit.message, 'chore(android): release '))"
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -37,6 +37,7 @@ jobs:
           echo "version=$major.$minor.$((patch + 1))-nightly.$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
 
   build:
+    if: "github.repository == 'Viren070/AIOStreams'"
     needs: version
     uses: ./.github/workflows/android-build.yml
     secrets: inherit

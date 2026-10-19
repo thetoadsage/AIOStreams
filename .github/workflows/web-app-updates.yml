@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   pull-request:
+    if: "github.repository == 'Viren070/AIOStreams'"
     name: pull request (${{ matrix.app }})
     runs-on: ubuntu-latest
     timeout-minutes: 5
