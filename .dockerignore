@@ -6,6 +6,7 @@
 **/.next
 **/data
 .env
+**/.env
 **/.env.*
 !**/.env.sample
 !**/.env.example
