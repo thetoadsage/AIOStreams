@@ -39,6 +39,7 @@ import {
 import { SceneMappingDataset } from './scene-mappings.js';
 import { resolveCrossProviderIds } from './id-resolution.js';
 import { SkyhookMetadata } from './skyhook.js';
+import { createHash } from 'node:crypto';
 
 const logger = createLogger('metadata-service');
 
@@ -49,6 +50,13 @@ export interface MetadataServiceConfig {
 }
 
 export class MetadataService {
+  // A lease keeps a completed preparation available through the internal HTTP
+  // hop, including later groups. Unlike the lock's two-second result retention,
+  // this is tied to execution lifetime, not a timing assumption.
+  private static prepared = new Map<
+    string,
+    { promise: Promise<Metadata>; users: number }
+  >();
   private readonly lock: DistributedLock;
   private readonly config: MetadataServiceConfig;
 
@@ -66,10 +74,73 @@ export class MetadataService {
     id: ParsedId,
     type: (typeof TYPES)[number]
   ): Promise<Metadata> {
+    const prepared = MetadataService.prepared.get(this.key(id));
+    return structuredClone(
+      await (prepared ? prepared.promise : this.resolveMetadata(id, type))
+    );
+  }
+
+  private key(id: ParsedId): string {
+    const credentials = createHash('sha256')
+      .update(
+        JSON.stringify([
+          this.config.tmdbAccessToken ?? appConfig.metadata.tmdb.accessToken,
+          this.config.tmdbApiKey ?? appConfig.metadata.tmdb.apiKey,
+          this.config.tvdbApiKey ?? appConfig.metadata.tvdb.apiKey,
+        ])
+      )
+      .digest('hex');
+    return `metadata:v2:${id.mediaType}:${id.type}:${id.value}:${id.season ?? ''}:${id.episode ?? ''}:${credentials}`;
+  }
+
+  public async prepare(
+    id: ParsedId,
+    type: (typeof TYPES)[number],
+    waitTimeout = appConfig.userLimits.timeouts.maxTimeout
+  ): Promise<() => void> {
+    const key = this.key(id);
+    let entry = MetadataService.prepared.get(key);
+    if (!entry) {
+      entry = { promise: this.resolveMetadata(id, type), users: 0 };
+      MetadataService.prepared.set(key, entry);
+    }
+    entry.users++;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      if (--entry.users === 0 && MetadataService.prepared.get(key) === entry) {
+        MetadataService.prepared.delete(key);
+      }
+    };
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        entry.promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('Required metadata preparation timed out')),
+            waitTimeout
+          );
+        }),
+      ]);
+      return release;
+    } catch (error) {
+      release();
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async resolveMetadata(
+    id: ParsedId,
+    type: (typeof TYPES)[number]
+  ): Promise<Metadata> {
     return withRetry(
       async () => {
         const { result } = await this.lock.withLock(
-          `metadata:${id.mediaType}:${id.type}:${id.value}:${id.season ?? ''}:${id.episode ?? ''}${this.config.tmdbAccessToken || this.config.tmdbApiKey ? ':tmdb' : ''}${this.config.tvdbApiKey ? ':tvdb' : ''}`,
+          this.key(id),
           async () => {
             const start = Date.now();
             // fill order is irrelevant; merge.ts decides what wins
@@ -174,10 +245,22 @@ export class MetadataService {
               const ownId = animeEntry?.mappings?.imdbId?.toString();
               promises.push(
                 (async () => {
-                  const meta = await imdbMetadata.getCinemetaData(
-                    hintedId,
-                    type
-                  );
+                  let meta: Meta;
+                  try {
+                    meta = await imdbMetadata.getCinemetaData(hintedId, type, {
+                      season: id.season,
+                      episode: id.episode,
+                    });
+                  } catch (error) {
+                    // A failed/stale hinted show must not hide an already
+                    // cached episode on the anime entry's own IMDb record.
+                    if (!ownId || ownId === hintedId || !id.episode)
+                      throw error;
+                    return imdbMetadata.getCinemetaData(ownId, type, {
+                      season: id.season,
+                      episode: id.episode,
+                    });
+                  }
                   // hints can name an IMDb entry Cinemeta has no aired episode for
                   const hasEpisode = meta?.videos?.some(
                     (v) =>
@@ -193,7 +276,10 @@ export class MetadataService {
                     !hasEpisode
                   ) {
                     return (
-                      (await imdbMetadata.getCinemetaData(ownId, type)) ?? meta
+                      (await imdbMetadata.getCinemetaData(ownId, type, {
+                        season: id.season,
+                        episode: id.episode,
+                      })) ?? meta
                     );
                   }
                   return meta;
@@ -620,8 +706,7 @@ export class MetadataService {
                     }
                   : undefined;
               let tvdbEp:
-                | { airDate?: string; titles: MetadataTitle[] }
-                | undefined;
+                { airDate?: string; titles: MetadataTitle[] } | undefined;
               if (tvdbEpisodes.status === 'fulfilled' && tvdbEpisodes.value) {
                 const match = tvdbEpisodes.value.find(
                   (e) => e.number === episodeNumber
@@ -640,8 +725,7 @@ export class MetadataService {
                 }
               }
               let skyhookEp:
-                | { airDate?: string; titles: MetadataTitle[] }
-                | undefined;
+                { airDate?: string; titles: MetadataTitle[] } | undefined;
               if (skyhookShow.status === 'fulfilled' && skyhookShow.value) {
                 for (const episode of skyhookShow.value.episodes ?? []) {
                   if (episode.seasonNumber !== seasonNumber) continue;
@@ -897,8 +981,8 @@ export class MetadataService {
             return metadata;
           },
           {
-            timeout: 10000,
-            ttl: 12000,
+            timeout: appConfig.userLimits.timeouts.maxTimeout,
+            ttl: appConfig.userLimits.timeouts.maxTimeout + 1000,
             retryInterval: 100,
             type: 'memory',
           }
